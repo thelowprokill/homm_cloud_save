@@ -1,0 +1,22 @@
+# docker compose run --rm build-linux    -> dist/linux/homm_sync
+# docker compose run --rm build-windows  -> dist/windows/homm_sync.exe
+# copy .env next to the executable before running it
+services:
+  build-linux:
+    image: python:3.12-slim-bookworm  # older glibc = runs on more distros
+    working_dir: /src
+    volumes: [".:/src"]
+    command: >
+      sh -c "apt-get update -qq && apt-get install -y -qq binutils >/dev/null &&
+             pip install -q pyinstaller requests &&
+             pyinstaller --onefile --clean --distpath dist/linux --workpath build/linux --specpath build/linux homm_sync.py &&
+             chown -R $$(stat -c %u:%g /src) dist build"
+
+  build-windows:
+    image: tobix/pywine:3.12  # wine + windows python
+    working_dir: /src
+    volumes: [".:/src"]
+    command: >
+      sh -c "wine python -m pip install -q pyinstaller requests &&
+             wine python -m PyInstaller --onefile --clean --distpath dist/windows --workpath build/windows --specpath build/windows homm_sync.py &&
+             chown -R $$(stat -c %u:%g /src) dist build"
