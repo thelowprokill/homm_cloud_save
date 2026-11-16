@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+homm_sync
+last_sync
+tmp/
+test.sh
+
 # C extensions
 *.so
 
