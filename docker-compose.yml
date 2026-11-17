@@ -1,6 +1,6 @@
 # docker compose run --rm build-linux    -> dist/linux/homm_sync
 # docker compose run --rm build-windows  -> dist/windows/homm_sync.exe
-# copy .env next to the executable before running it
+# copy homm_sync.env next to the executable before running it
 services:
   build-linux:
     image: python:3.12-slim-bookworm  # older glibc = runs on more distros
@@ -13,7 +13,7 @@ services:
              chown -R $$(stat -c %u:%g /src) dist build"
 
   build-windows:
-    image: tobix/pywine:3.12  # wine + windows python
+    image: tobix/pywine:3.11  # wine + windows python; 3.12+ exes fail to start under wine/winlator
     working_dir: /src
     volumes: [".:/src"]
     command: >

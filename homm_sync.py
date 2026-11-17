@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 """Sync HoMM saves with the cloud-save server, launch the game, keep syncing while it runs."""
+import logging
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import requests
 
-# frozen (pyinstaller) -> .env / last_sync.txt live next to the exe, not in the temp unpack dir
+# frozen (pyinstaller) -> config / last_sync.txt / log live next to the exe, not in the temp unpack dir
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
 LAST_SYNC = HERE / "last_sync.txt"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[RotatingFileHandler(HERE / "homm_sync.log", maxBytes=1_000_000, backupCount=3), logging.StreamHandler()],
+)
+log = logging.getLogger("homm_sync")
+sys.excepthook = lambda *exc: log.critical("crashed", exc_info=exc)  # e.g. missing config, so it lands in the log too
 
 
 def load_env(path):
@@ -23,9 +33,9 @@ def load_env(path):
     return env
 
 
-cfg = load_env(HERE / ".env")
+cfg = load_env(HERE / "homm_sync.env")  # not ".env": wine/winlator hide dotfiles
 API = cfg["SERVER"].rstrip("/") + "/apis/call"
-GAMES = Path(cfg["GAMES_DIR"]).expanduser().resolve()
+GAMES = (HERE / Path(cfg["GAMES_DIR"]).expanduser()).resolve()  # relative paths are relative to the exe
 BASE = {"scope": "homm_saves", "machine": cfg["MACHINE"]}
 
 s = requests.Session()
@@ -61,17 +71,17 @@ def sync():
         path = item["path"]
         remote_ts = datetime.fromisoformat(item.get("updated_at", "1970-01-01T00:00:00Z").replace("Z", "+00:00")).timestamp()
         if path in local and local[path].stat().st_mtime >= remote_ts:
-            print(f"conflict, local is newer, keeping local: {path}")
+            log.info(f"conflict, local is newer, keeping local: {path}")
             continue
         local.pop(path, None)  # remote is newer: pull it, don't push the older local copy
         out = (GAMES / path).resolve()
         if not out.is_relative_to(GAMES):
-            print(f"refusing path outside games dir: {path}")
+            log.warning(f"refusing path outside games dir: {path}")
             continue
-        print(f"pull {path}")
+        log.info(f"pull {path}")
         r = s.get(API, params={**BASE, "route": "file", "path": path}, timeout=60)
         if r.status_code == 404:  # listed in changes but gone on the server; skip so it can't block the sync
-            print(f"  missing on server, skipped: {path}")
+            log.warning(f"missing on server, skipped: {path}")
             continue
         if not r.ok:
             raise RuntimeError(f"{r.status_code} {r.reason} for {r.url}: {r.text[:500]}")
@@ -81,32 +91,36 @@ def sync():
         os.utime(out, (t0.timestamp(), t0.timestamp()))  # mtime == t0 -> not re-pushed next sync
 
     for path, p in local.items():
-        print(f"push {path}")
+        log.info(f"push {path}")
         with open(p, "rb") as f:
             call("PUT", params={**BASE, "route": "file"}, data={"path": path}, files={"file": f})
 
     LAST_SYNC.write_text(t0.isoformat())  # only after everything succeeded
+    log.info("sync ok")
 
 
 def safe_sync():
     try:
         sync()
     except Exception as e:  # network down etc.; last_sync untouched so next sync retries
-        print(f"sync failed: {e}")
+        log.error(f"sync failed: {e}")
 
 
 def main():
-    sys.stdout.reconfigure(line_buffering=True)  # show output immediately even when logged/piped
+    log.info(f"start, machine={cfg['MACHINE']}, games dir={GAMES}")
     safe_sync()
-    game = subprocess.Popen(cfg["GAME_CMD"], shell=True)
+    log.info(f"launching: {cfg['GAME_CMD']}")
+    game = subprocess.Popen(cfg["GAME_CMD"], shell=True, cwd=HERE)
     cadence = int(cfg.get("UPLOAD_CADENCE", 300))
     while True:
         try:
             game.wait(timeout=cadence)
+            log.info(f"game exited with code {game.returncode}")
             break
         except subprocess.TimeoutExpired:
             safe_sync()
     safe_sync()
+    log.info("done")
 
 
 if __name__ == "__main__":

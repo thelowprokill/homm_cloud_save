@@ -226,3 +226,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+homm_sync.env
