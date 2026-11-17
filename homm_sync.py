@@ -55,8 +55,9 @@ def sync():
     t0 = datetime.now(timezone.utc)
     last = datetime.fromisoformat(LAST_SYNC.read_text().strip()) if LAST_SYNC.exists() else None
 
-    jwt = call("GET", params={"username": cfg["API_USER"], "password": cfg["API_PASSWORD"]}).json()["jwt"]
-    s.headers["x-api-key"] = jwt
+    if "x-api-key" not in s.headers:  # log in once; dropped again when a sync fails
+        log.info("login")
+        s.headers["x-api-key"] = call("GET", params={"username": cfg["API_USER"], "password": cfg["API_PASSWORD"]}).json()["jwt"]
 
     # snapshot local changes before pulling, so pulled files aren't mistaken for local edits
     local = {
@@ -100,17 +101,21 @@ def sync():
 
 
 def safe_sync():
-    try:
-        sync()
-    except Exception as e:  # network down etc.; last_sync untouched so next sync retries
-        log.error(f"sync failed: {e}")
+    for attempt in (1, 2):  # a failure may be an expired token: log in again and retry once
+        try:
+            sync()
+            return
+        except Exception as e:  # network down etc.; last_sync untouched so next sync retries
+            s.headers.pop("x-api-key", None)
+            log.error(f"sync failed (attempt {attempt}): {e}")
 
 
 def main():
     log.info(f"start, machine={cfg['MACHINE']}, games dir={GAMES}")
-    safe_sync()
-    log.info(f"launching: {cfg['GAME_CMD']}")
-    game = subprocess.Popen(cfg["GAME_CMD"], shell=True, cwd=HERE)
+    game_dir = (HERE / Path(cfg.get("GAME_DIR", ".")).expanduser()).resolve()  # relative to the exe
+    log.info(f"launching: {cfg['GAME_CMD']} (in {game_dir})")
+    game = subprocess.Popen(cfg["GAME_CMD"], shell=True, cwd=game_dir)
+    safe_sync()  # runs while the game starts up
     cadence = int(cfg.get("UPLOAD_CADENCE", 300))
     while True:
         try:
