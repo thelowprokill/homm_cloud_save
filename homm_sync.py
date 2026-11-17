@@ -50,16 +50,29 @@ def call(method, **kw):
     return r
 
 
+def scan(d):
+    # os.scandir, not rglob+stat: on Windows the type and mtime come with the directory listing,
+    # so there is no per-file stat call. Under wine/winlator that is ~70x faster.
+    with os.scandir(d) as it:
+        for e in it:
+            if e.is_dir():
+                yield from scan(e.path)
+            elif e.is_file():
+                yield e
+
+
 def sync(final=False):
     t0 = datetime.now(timezone.utc)
     last = datetime.fromisoformat(LAST_SYNC.read_text().strip()) if LAST_SYNC.exists() else None
 
     # snapshot local changes before pulling, so pulled files aren't mistaken for local edits
-    local = {
-        p.relative_to(GAMES).as_posix(): p
-        for p in GAMES.rglob("*")
-        if p.is_file() and (last is None or p.stat().st_mtime > last.timestamp())
-    }
+    n = 0
+    local = {}
+    for e in scan(GAMES):
+        n += 1
+        if last is None or e.stat().st_mtime > last.timestamp():
+            local[Path(e.path).relative_to(GAMES).as_posix()] = Path(e.path)
+    log.info(f"scanned {n} files, {len(local)} changed ({(datetime.now(timezone.utc) - t0).total_seconds():.1f}s)")
 
     # nothing to upload on exit: skip the server entirely.
     # last_sync stays untouched, so remote changes still get pulled on the next start.
