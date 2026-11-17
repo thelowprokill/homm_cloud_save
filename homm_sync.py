@@ -36,7 +36,8 @@ if not s.verify:
 
 def call(method, **kw):
     r = s.request(method, API, timeout=60, **kw)
-    r.raise_for_status()
+    if not r.ok:  # include the server's explanation, not just the status line
+        raise RuntimeError(f"{r.status_code} {r.reason} for {r.url}: {r.text[:500]}")
     return r
 
 
@@ -58,15 +59,23 @@ def sync():
     changes = call("GET", params={**BASE, "route": "changes", **since}).json()
     for item in changes.get("data", []):
         path = item["path"]
-        if path in local:
-            print(f"conflict, keeping local: {path}")
+        remote_ts = datetime.fromisoformat(item.get("updated_at", "1970-01-01T00:00:00Z").replace("Z", "+00:00")).timestamp()
+        if path in local and local[path].stat().st_mtime >= remote_ts:
+            print(f"conflict, local is newer, keeping local: {path}")
             continue
+        local.pop(path, None)  # remote is newer: pull it, don't push the older local copy
         out = (GAMES / path).resolve()
         if not out.is_relative_to(GAMES):
             print(f"refusing path outside games dir: {path}")
             continue
         print(f"pull {path}")
-        data = call("GET", params={**BASE, "route": "file", "path": path}).content
+        r = s.get(API, params={**BASE, "route": "file", "path": path}, timeout=60)
+        if r.status_code == 404:  # listed in changes but gone on the server; skip so it can't block the sync
+            print(f"  missing on server, skipped: {path}")
+            continue
+        if not r.ok:
+            raise RuntimeError(f"{r.status_code} {r.reason} for {r.url}: {r.text[:500]}")
+        data = r.content
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(data)
         os.utime(out, (t0.timestamp(), t0.timestamp()))  # mtime == t0 -> not re-pushed next sync
@@ -87,6 +96,7 @@ def safe_sync():
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)  # show output immediately even when logged/piped
     safe_sync()
     game = subprocess.Popen(cfg["GAME_CMD"], shell=True)
     cadence = int(cfg.get("UPLOAD_CADENCE", 300))
