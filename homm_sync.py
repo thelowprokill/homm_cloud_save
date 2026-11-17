@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import requests
@@ -17,7 +16,7 @@ LAST_SYNC = HERE / "last_sync.txt"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[RotatingFileHandler(HERE / "homm_sync.log", maxBytes=1_000_000, backupCount=3), logging.StreamHandler()],
+    handlers=[logging.FileHandler(HERE / "homm_sync.log", mode="w"), logging.StreamHandler()],
 )
 log = logging.getLogger("homm_sync")
 sys.excepthook = lambda *exc: log.critical("crashed", exc_info=exc)  # e.g. missing config, so it lands in the log too
@@ -51,13 +50,9 @@ def call(method, **kw):
     return r
 
 
-def sync():
+def sync(final=False):
     t0 = datetime.now(timezone.utc)
     last = datetime.fromisoformat(LAST_SYNC.read_text().strip()) if LAST_SYNC.exists() else None
-
-    if "x-api-key" not in s.headers:  # log in once; dropped again when a sync fails
-        log.info("login")
-        s.headers["x-api-key"] = call("GET", params={"username": cfg["API_USER"], "password": cfg["API_PASSWORD"]}).json()["jwt"]
 
     # snapshot local changes before pulling, so pulled files aren't mistaken for local edits
     local = {
@@ -65,6 +60,16 @@ def sync():
         for p in GAMES.rglob("*")
         if p.is_file() and (last is None or p.stat().st_mtime > last.timestamp())
     }
+
+    # nothing to upload on exit: skip the server entirely.
+    # last_sync stays untouched, so remote changes still get pulled on the next start.
+    if final and not local:
+        log.info("no local changes, skipping final sync")
+        return
+
+    if "x-api-key" not in s.headers:  # log in once; dropped again when a sync fails
+        log.info("login")
+        s.headers["x-api-key"] = call("GET", params={"username": cfg["API_USER"], "password": cfg["API_PASSWORD"]}).json()["jwt"]
 
     since = {"since": last.strftime("%Y-%m-%dT%H:%M:%SZ")} if last else {}
     changes = call("GET", params={**BASE, "route": "changes", **since}).json()
@@ -97,13 +102,13 @@ def sync():
             call("PUT", params={**BASE, "route": "file"}, data={"path": path}, files={"file": f})
 
     LAST_SYNC.write_text(t0.isoformat())  # only after everything succeeded
-    log.info("sync ok")
+    log.info(f"sync ok ({(datetime.now(timezone.utc) - t0).total_seconds():.1f}s)")
 
 
-def safe_sync():
+def safe_sync(final=False):
     for attempt in (1, 2):  # a failure may be an expired token: log in again and retry once
         try:
-            sync()
+            sync(final)
             return
         except Exception as e:  # network down etc.; last_sync untouched so next sync retries
             s.headers.pop("x-api-key", None)
@@ -124,7 +129,7 @@ def main():
             break
         except subprocess.TimeoutExpired:
             safe_sync()
-    safe_sync()
+    safe_sync(final=True)
     log.info("done")
 
 
